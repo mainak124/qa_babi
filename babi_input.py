@@ -14,37 +14,42 @@ input_mask_mode = "sentence"
 
 # adapted from https://github.com/YerevaNN/Dynamic-memory-networks-in-Theano/
 def init_babi(fname):
-    
-    print("==> Loading test from %s" % fname)
-    tasks = []
-    task = None
-    for i, line in enumerate(open(fname)):
-        id = int(line[0:line.find(' ')])
-        if id == 1:
-            task = {"C": "", "Q": "", "A": "", "S": ""} 
-            counter = 0
-            id_map = {}
-            
-        line = line.strip()
-        line = line.replace('.', ' . ')
-        line = line[line.find(' ')+1:]
-        # if not a question
-        if line.find('?') == -1:
-            task["C"] += line
-            id_map[id] = counter
-            counter += 1
-            
-        else:
-            idx = line.find('?')
-            tmp = line[idx+1:].split('\t')
-            task["Q"] = line[:idx]
-            task["A"] = tmp[1].strip()
-            task["S"] = []
-            for num in tmp[2].split():
-                task["S"].append(id_map[int(num.strip())])
-            tasks.append(task.copy())
-
-    return tasks
+	
+	print("==> Loading test from %s" % fname)
+	tasks = []
+	task = None
+	for i, line in enumerate(open(fname)):
+		id = int(line[0:line.find(' ')])
+		if id == 1:
+			task = {"C": "", "Q": "", "A": "", "S": ""} 
+			counter = 0
+			id_map = {}
+		    
+		line = line.strip()
+		line = line.replace('.', ' . ')
+		line = line[line.find(' ')+1:]
+		# if not a question
+		if line.find('?') == -1:
+			task["C"] += line
+			id_map[id] = counter
+			counter += 1
+		    
+		else:
+			idx = line.find('?')
+			tmp = line[idx+1:].split('\t')
+			task["Q"] = line[:idx]
+			task["A"] = tmp[1].strip()
+			task["S"] = []
+			if task["A"].find(',') != -1: # Must be path finding task (task-19)
+				assert FLAGS.babi_id == 19
+				d = {'s': 'south', 'n': 'north', 'e': 'east', 'w': 'west'}
+				tmp_ = [d[p_] for p_ in task["A"].split(',')]
+				task["A"] = ' '.join(tmp_)
+			for num in tmp[2].split():
+				task["S"].append(id_map[int(num.strip())])
+			tasks.append(task.copy())
+	
+	return tasks
 
 
 def get_babi_raw(id, test_id):
@@ -103,106 +108,116 @@ def get_babi_raw(id, test_id):
 
             
 def load_glove(dim):
-    word2vec = {}
-    
-    print("==> loading glove")
-    with open(("./data/glove/glove.6B/glove.6B." + str(dim) + "d.txt")) as f:
-        for line in f:    
-            l = line.split()
-            word2vec[l[0]] = map(float, l[1:])
-            
-    print("==> glove is loaded")
-    
-    return word2vec
+	word2vec = {}
+	
+	print("==> loading glove")
+	with open(("./data/glove/glove.6B/glove.6B." + str(dim) + "d.txt")) as f:
+		for line in f:    
+			l = line.split()
+			word2vec[l[0]] = map(float, l[1:])
+	        
+	print("==> glove is loaded")
+	
+	return word2vec
 
 
 def create_vector(word, word2vec, word_vector_size, silent=True):
-    # if the word is missing from Glove, create some fake vector and store in glove!
-    vector = np.random.uniform(0.0,1.0,(word_vector_size,))
-    word2vec[word] = vector
-    if (not silent):
-        print("utils.py::create_vector => %s is missing" % word)
-    return vector
+	# if the word is missing from Glove, create some fake vector and store in glove!
+	vector = np.random.uniform(0.0,1.0,(word_vector_size,))
+	word2vec[word] = vector
+	if (not silent):
+		print("utils.py::create_vector => %s is missing" % word)
+	return vector
 
 def process_word(word, word2vec, vocab, ivocab, word_vector_size, to_return="word2vec", silent=True):
-    if not word in word2vec:
-        create_vector(word, word2vec, word_vector_size, silent)
-    if not word in vocab: 
-        next_index = len(vocab)
-        vocab[word] = next_index
-        ivocab[next_index] = word
-    
-    if to_return == "word2vec":
-        return word2vec[word]
-    elif to_return == "index":
-        return vocab[word]
-    elif to_return == "onehot":
-        raise Exception("to_return = 'onehot' is not implemented yet")
+	if not word in word2vec:
+		create_vector(word, word2vec, word_vector_size, silent)
+	if not word in vocab: 
+		next_index = len(vocab)
+		vocab[word] = next_index
+		ivocab[next_index] = word
+	
+	if to_return == "word2vec":
+		return word2vec[word]
+	elif to_return == "index":
+		return vocab[word]
+	elif to_return == "onehot":
+		raise Exception("to_return = 'onehot' is not implemented yet")
 
 def process_input(data_raw, floatX, word2vec, vocab, ivocab, embed_size, split_sentences=False):
-    questions = []
-    inputs = []
-    answers = []
-    input_masks = []
-    relevant_labels = []
-    for x in data_raw:
-        if split_sentences:
-            inp = x["C"].lower().split(' . ') 
-            inp = [w for w in inp if len(w) > 0]
-            inp = [i.split() for i in inp]
-        else:
-            inp = x["C"].lower().split(' ') 
-            inp = [w for w in inp if len(w) > 0]
-
-        q = x["Q"].lower().split(' ')
-        q = [w for w in q if len(w) > 0]
-
-        if split_sentences: 
-            inp_vector = [[process_word(word = w, 
-                                        word2vec = word2vec, 
-                                        vocab = vocab, 
-                                        ivocab = ivocab, 
-                                        word_vector_size = embed_size, 
-                                        to_return = "index") for w in s] for s in inp]
-        else:
-            inp_vector = [process_word(word = w, 
-                                        word2vec = word2vec, 
-                                        vocab = vocab, 
-                                        ivocab = ivocab, 
-                                        word_vector_size = embed_size, 
-                                        to_return = "index") for w in inp]
-                                    
-        q_vector = [process_word(word = w, 
-                                    word2vec = word2vec, 
-                                    vocab = vocab, 
-                                    ivocab = ivocab, 
-                                    word_vector_size = embed_size, 
-                                    to_return = "index") for w in q]
-        
-        if split_sentences:
-            inputs.append(inp_vector)
-        else:
-            inputs.append(np.vstack(inp_vector).astype(floatX))
-        questions.append(np.vstack(q_vector).astype(floatX))
-        answers.append(process_word(word = x["A"], 
-                                        word2vec = word2vec, 
-                                        vocab = vocab, 
-                                        ivocab = ivocab, 
-                                        word_vector_size = embed_size, 
-                                        to_return = "index"))
-        # NOTE: here we assume the answer is one word! 
-
-        if not split_sentences:
-            if input_mask_mode == 'word':
-                input_masks.append(np.array([index for index, w in enumerate(inp)], dtype=np.int32)) 
-            elif input_mask_mode == 'sentence': 
-                input_masks.append(np.array([index for index, w in enumerate(inp) if w == '.'], dtype=np.int32)) 
-            else:
-                raise Exception("invalid input_mask_mode")
-
-        relevant_labels.append(x["S"])
-    
-    return inputs, questions, answers, input_masks, relevant_labels 
+	questions = []
+	inputs = []
+	answers = []
+	input_masks = []
+	relevant_labels = []
+	for x in data_raw:
+		if split_sentences:
+			inp = x["C"].lower().split(' . ') 
+			inp = [w for w in inp if len(w) > 0]
+			inp = [i.split() for i in inp]
+		else:
+			inp = x["C"].lower().split(' ') 
+			inp = [w for w in inp if len(w) > 0]
+		
+		q = x["Q"].lower().split(' ')
+		q = [w for w in q if len(w) > 0]
+		
+		if split_sentences: 
+			inp_vector = [[process_word(word = w, 
+										word2vec = word2vec, 
+										vocab = vocab, 
+										ivocab = ivocab, 
+										word_vector_size = embed_size, 
+										to_return = "index") for w in s] for s in inp]
+		else:
+			inp_vector = [process_word(word = w, 
+										word2vec = word2vec, 
+										vocab = vocab, 
+										ivocab = ivocab, 
+										word_vector_size = embed_size, 
+										to_return = "index") for w in inp]
+		                            
+		q_vector = [process_word(word = w, 
+									word2vec = word2vec, 
+									vocab = vocab, 
+									ivocab = ivocab, 
+									word_vector_size = embed_size, 
+									to_return = "index") for w in q]
+		
+		if split_sentences:
+			inputs.append(inp_vector)
+		else:
+			inputs.append(np.vstack(inp_vector).astype(floatX))
+		questions.append(np.vstack(q_vector).astype(floatX))
+		if x["A"].find(' ') != -1:
+			assert FLAGS.babi_id == 19
+			a_vector = [process_word(word = w_, 
+									word2vec = word2vec, 
+									vocab = vocab, 
+									ivocab = ivocab, 
+									word_vector_size = embed_size, 
+									to_return = "index") for w_ in x["A"].split(' ')]
+			answers.append(np.vstack(a_vector).astype(floatX))
+		else:
+			answers.append(process_word(word = x["A"], 
+			                            word2vec = word2vec, 
+			                            vocab = vocab, 
+			                            ivocab = ivocab, 
+			                            word_vector_size = embed_size, 
+			                            to_return = "index"))
+		# NOTE: here we assume the answer is one word! 
+		
+		if not split_sentences:
+			if input_mask_mode == 'word':
+				input_masks.append(np.array([index for index, w in enumerate(inp)], dtype=np.int32)) 
+			elif input_mask_mode == 'sentence': 
+				input_masks.append(np.array([index for index, w in enumerate(inp) if w == '.'], dtype=np.int32)) 
+			else:
+				raise Exception("invalid input_mask_mode")
+		
+		relevant_labels.append(x["S"])
+	
+	return inputs, questions, answers, input_masks, relevant_labels 
 
 def get_lens(inputs, split_sentences=False):
     lens = np.zeros((len(inputs)), dtype=int)
@@ -295,7 +310,7 @@ def load_babi(split_sentences=False):
 	
 	loopcount = 2 # if FLAGS.mode == 'train' else 1
 	for iter_ in range(loopcount):
-		inputs, questions, answers, input_masks, rel_labels = train_data if iter_==1 else test_data
+		inputs, questions, answers, input_masks, rel_labels = train_data if iter_==0 else test_data
 		
 		if split_sentences:
 			input_lens, sen_lens, max_sen_len = get_sentence_lens(inputs)
@@ -314,20 +329,23 @@ def load_babi(split_sentences=False):
 		if split_sentences:
 			inputs = pad_inputs(inputs, input_lens, max_input_len, "split_sentences", sen_lens, max_sen_len)
 			input_masks = np.zeros(len(inputs))
+			print("inputs shape: ", inputs.shape)
 		else:
 			inputs = pad_inputs(inputs, input_lens, max_input_len)
 			input_masks = pad_inputs(input_masks, mask_lens, max_mask_len, "mask")
 		
 		questions = pad_inputs(questions, q_lens, max_q_len)
 		
-		answers = np.expand_dims(np.stack(answers), 1)
+		answers = np.squeeze(np.stack(answers)) if FLAGS.babi_id == 19 else np.expand_dims(np.stack(answers), 1)
+		print("max input length: ", max_input_len)
+		print("Answer shape: ", answers.shape)
 		
 		rel_labels = np.zeros((len(rel_labels), len(rel_labels[0])))
 		
 		for i, tt in enumerate(rel_labels):
 			rel_labels[i] = np.array(tt, dtype=int)
 		
-		if iter_==1:
+		if iter_==0:
 			train = questions[:FLAGS.num_train], inputs[:FLAGS.num_train], q_lens[:FLAGS.num_train], input_lens[:FLAGS.num_train], input_masks[:FLAGS.num_train], answers[:FLAGS.num_train], rel_labels[:FLAGS.num_train] 
 			
 			valid = questions[FLAGS.num_train:], inputs[FLAGS.num_train:], q_lens[FLAGS.num_train:], input_lens[FLAGS.num_train:], input_masks[FLAGS.num_train:], answers[FLAGS.num_train:], rel_labels[FLAGS.num_train:] 

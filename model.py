@@ -62,18 +62,22 @@ class QAModel(object):
 			self.total_train_steps = None
 			self.total_eval_steps = None
 			self.total_test_steps = len(self.test[0]) // FLAGS.batch_size
+
+		tf.reset_default_graph()
 		
 		self.encoding = _position_encoding(self.max_sen_len, FLAGS.embed_size)
 		self.embeddings = tf.Variable(word_embedding.astype(np.float32), name="Embedding")
 	
 	def add_placeholders(self):
 	
+		answer_len = 2 if FLAGS.babi_id == 19 else 1		
+
 		self.question_placeholder = tf.placeholder(tf.int32, shape=(FLAGS.batch_size, self.max_q_len))
 		self.input_placeholder = tf.placeholder(tf.int32, shape=(FLAGS.batch_size, self.max_input_len, self.max_sen_len))
 		
 		self.question_len_placeholder = tf.placeholder(tf.int32, shape=(FLAGS.batch_size,))
 		self.input_len_placeholder = tf.placeholder(tf.int32, shape=(FLAGS.batch_size,))
-		self.answer_placeholder = tf.placeholder(tf.int64, shape=(FLAGS.batch_size, 1))
+		self.answer_placeholder = tf.placeholder(tf.int64, shape=(FLAGS.batch_size, answer_len))
 		self.rel_label_placeholder = tf.placeholder(tf.int32, shape=(FLAGS.batch_size, self.num_supporting_facts))
 		self.dropout_placeholder = tf.placeholder(tf.float32)
 	
@@ -99,6 +103,10 @@ class QAModel(object):
 		step=0
 		
 		index = range(step*FLAGS.batch_size, (step+1)*FLAGS.batch_size)
+
+		# print('qp shape: ', qp[index].shape)
+		# print('ip shape: ', ip[index].shape)
+		# print('a shape: ', a[index].shape)
 		
 		feed_dict = {
 						self.question_placeholder: qp[index],
@@ -176,7 +184,7 @@ class QAModel(object):
 			p_gens: A list of scalar tensors; the generation probabilities
 		"""
 		# list length max_dec_steps containing shape (batch_size, emb_size)
-		decoder_inputs = [tf.nn.embedding_lookup(self.embeddings, tf.zeros_like(tf.unstack(self.answer_placeholder, axis=1)[0]))] #+ [tf.nn.embedding_lookup(self.embeddings, x) for x in tf.unstack(self.answer_placeholder, axis=1)]
+		decoder_inputs = [tf.nn.embedding_lookup(self.embeddings, tf.ones_like(tf.unstack(self.answer_placeholder, axis=1)[0]))] + [tf.nn.embedding_lookup(self.embeddings, x) for x in tf.unstack(self.answer_placeholder, axis=1)[:-1]]
 		encoder_states = self.context_outs
 		
 		cell = tf.nn.rnn_cell.LSTMCell(FLAGS.decoder_hidden_size, state_is_tuple=True, initializer=tf.random_uniform_initializer(-0.02, 0.02, seed=123))
@@ -187,7 +195,7 @@ class QAModel(object):
 		return outputs, out_state, attn_dists, p_gens
 	
 	def greedy_decoder(self, vocab_lists):
-		return tf.argmax(vocab_lists[0], 1)
+		return tf.stack([tf.argmax(vocab_list, 1) for vocab_list in vocab_lists], axis=1)
 	
 	def add_seq2seq(self):
 		"""Add the whole sequence-to-sequence model to the graph."""
@@ -256,12 +264,18 @@ class QAModel(object):
 						self.loss = self.mask_and_avg(loss_per_step, self._padding_mask)
 					
 					else: # baseline model
-						self.loss = tf.contrib.seq2seq.sequence_loss(tf.stack(vocab_scores, axis=1), self.answer_placeholder, tf.ones([FLAGS.batch_size, 1]))
+						print("shape logits and answers", len(vocab_scores), tf.stack(vocab_scores, axis=1), self.answer_placeholder)
+						self.loss = tf.contrib.seq2seq.sequence_loss(tf.stack(vocab_scores, axis=1), self.answer_placeholder, tf.ones_like(self.answer_placeholder, dtype=tf.float32))
 					
 					tf.summary.scalar('loss', self.loss)
 			
 			with tf.name_scope('acc'):
-				correct_vec = tf.equal(tf.argmax(vocab_scores[0], 1), tf.squeeze(self.answer_placeholder))
+				if FLAGS.babi_id == 19:
+					correct_vec = tf.logical_and(\
+									tf.equal(tf.argmax(vocab_scores[0], 1), self.answer_placeholder[:, 0]),\
+									tf.equal(tf.argmax(vocab_scores[1], 1), self.answer_placeholder[:, 1]))
+				else:
+					correct_vec = tf.equal(tf.argmax(vocab_scores[0], 1), tf.squeeze(self.answer_placeholder))
 				num_corrects = tf.reduce_sum(tf.cast(correct_vec, 'float'), name='num_corrects')
 				self.acc = tf.reduce_mean(tf.cast(correct_vec, 'float'), name='acc')
 				tf.summary.scalar('acc', self.acc)
@@ -280,7 +294,7 @@ class QAModel(object):
 		# Take gradients of the trainable variables w.r.t. the loss function to minimize
 		tvars = tf.trainable_variables()
 		grads = tf.gradients(self.loss, tvars, aggregation_method=tf.AggregationMethod.EXPERIMENTAL_TREE)
-		for v in tvars: print(v)
+		# for v in tvars: print(v)
 		
 		# optionally cap and noise gradients to regularize
 		if FLAGS.cap_grads:
@@ -327,7 +341,8 @@ class QAModel(object):
 			'global_step': self.global_step,
 			'acc': self.acc,
 		}
-		return sess.run(to_return, feed_dict)
+		with tf.device("/gpu:0"):
+			return sess.run(to_return, feed_dict)
 	
 	def run_train_epoch(self, sess, epoch_id, summary_writer=None):
 		"""Runs one training epoch. Returns a dictionary containing train op, summaries, loss and global_step."""
@@ -440,7 +455,7 @@ class QAModel(object):
 		contexts = results['contexts']
 		attentions = results['attentions']
 
-		print("Answers, question, context, attention shape: ", answers.shape, questions.shape, contexts.shape, attentions[0].shape)
+		print("Answers, question, context, attention, prediction shape: ", answers.shape, questions.shape, contexts.shape, attentions[0].shape, predictions.shape)
 		print("Accuracy: ", accuracy)
 		# ans = [self.ivocab[x] for x in answers.squeeze().tolist()]
 		# preds = [self.ivocab[x] for x in predictions.squeeze().tolist()]
@@ -449,7 +464,10 @@ class QAModel(object):
 				sys.stdout.write(' '.join([self.ivocab[word] for word in sentence if word > 0])+ '. ' + str(weight) + '\n')
 			#sys.stdout.write('\n')
 			print(' '.join([self.ivocab[x] for x in question if x > 0]))
-			print(self.ivocab[ans], self.ivocab[pred])
+			if isinstance(ans, list):
+				print('Answer: '+' '.join([self.ivocab[each] for each in ans]) + '    Prediction: ' + ' '.join([self.ivocab[each] for each in pred]))
+			else:
+				print('Answer: '+ self.ivocab[ans] + '    Prediction: ' + self.ivocab[pred])
 			print('\n\n')
 
 	def run_test_epoch(self, sess, summary_writer=None):
